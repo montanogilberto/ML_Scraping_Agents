@@ -1,32 +1,17 @@
-# Task: Fix Seller Scraping Pipeline for POS-Scoped Results
+# TODO: Vertex AI / Gemini Migration
 
-## Root Cause Summary
-The seller inventory scraping returns irrelevant data because:
-1. Uses `/tienda/{seller_id}` URL pattern (entire seller store) instead of category-scoped `_CustId_{seller_id}_PrCategId_AD`
-2. No click-tracker URL resolution (click1.mercadolibre.com.mx → actual URL)
-3. Returns only sample_permalink instead of limited cards array for proper context
+## Steps
 
-## Implementation Plan
+- [x] 1. Update `agents/ml_inventory/config/settings.py`:
+  - [x] Add Vertex AI credential fields (google_genai_use_vertexai, google_cloud_project, google_cloud_location, google_application_credentials)
+  - [x] Change model defaults to `gemini-2.5-pro`
+  - [x] Change persist_mode default to `backend`
+  - [x] Add model_post_init to propagate Vertex AI env vars
 
-### Step 1: Update parsers.py
-- [ ] Add `resolve_click_tracker_url()` function to follow redirects
-- [ ] Add `seller_category_url()` function for scoped seller URLs  
-- [ ] Update `extract_item_id_from_url()` to handle resolved URLs
+- [x] 2. Update `.env`:
+  - [x] Change MODEL_PLANNER, MODEL_COLLECTOR, MODEL_QA to `gemini-2.5-pro`
+  - [x] Change PERSIST_MODE to `backend`
+  - [x] Fix GOOGLE_APPLICATION_CREDENTIALS to macOS path
 
-### Step 2: Update tools.py
-- [ ] Modify `ml_scrape_seller_inventory` to accept optional `seller_listing_url` parameter
-- [ ] Change default URL pattern to `_CustId_{seller_id}_PrCategId_AD`
-- [ ] Add click-tracker resolution in card extraction loop
-- [ ] Return limited `cards` array (max 20) + `sample_permalink`
-- [ ] Update stats to include missing_titles, missing_item_id
-
-### Step 3: Update inventory_pipeline.py
-- [ ] Update SellerScout instruction to build category-scoped URLs
-- [ ] Pass category context from category_raw to seller scraping
-- [ ] Update output format to handle cards array
-
-### Step 4: Test & Verify
-- [ ] Verify scoped seller URL returns POS items
-- [ ] Confirm filtered_out count decreases
-- [ ] Validate cards array contains relevant items
-
+## Status
+- [x] All steps complete

@@ -4,7 +4,15 @@ from ..config.settings import load_settings
 from ..callbacks.observer import before_agent_callback, after_agent_callback, before_model_callback, after_model_callback
 from ..callbacks.guardian import GuardianDeContenido
 from ..callbacks.composer import chain_before_model, chain_after_model
-from ..mcp_servers.ml_scrape_mcp.tools import ml_scrape_category, ml_scrape_seller_inventory, ml_scrape_item_detail, ml_persist_items
+from ..mcp_servers.ml_scrape_mcp.tools import (
+    ml_scrape_category,
+    ml_scrape_seller_inventory,
+    ml_scrape_item_detail,
+    ml_persist_items,
+    ml_export_sell_listings,
+    ml_get_all_sell_listings,
+    ml_query_sell_listings,
+)
 
 settings=load_settings()
 
@@ -108,10 +116,20 @@ def build_root_agent():
     exporter=wrap(LlmAgent(
         name="Exporter",
         model=settings.model_qa,
-        tools=[ml_persist_items],
+        tools=[ml_get_all_sell_listings, ml_query_sell_listings, ml_export_sell_listings],
         instruction=(
-            "If plan.persist.mode exists, call ml_persist_items(items=items_raw.items, mode=plan.persist.mode). "
-            "Return ONLY JSON: {status, as_of, plan, stats, items, persist}."
+            "Before exporting, validate which items already exist in the database:\n"
+            "1. Call ml_query_sell_listings(channel='mercadolibre', market='MX') to fetch "
+            "existing listings for this channel/market from the backend DB.\n"
+            "2. Compare the returned channelItemIds against items_raw.items to identify "
+            "new vs already-existing items.\n"
+            "3. Call ml_export_sell_listings(items=items_raw.items) to send ALL scraped items "
+            "to the sellListings backend API (the backend handles upsert). Do NOT write to a file.\n"
+            "Return ONLY JSON: {status, as_of, plan, stats, items, existing_count, new_count, export} "
+            "where export is the result returned by ml_export_sell_listings "
+            "(fields: ok, status_code, exported_count, emitted, skipped, fx_rate_to_usd, fx_as_of_date, backend_response), "
+            "existing_count is the number of items already in DB, "
+            "new_count is the number of genuinely new items."
 
 "\n\n"
 "Plan:\n{plan}\n\n"

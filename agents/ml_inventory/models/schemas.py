@@ -8,7 +8,7 @@ class Limits(BaseModel):
     max_items_total: int = 300
 
 class PersistConfig(BaseModel):
-    mode: str = "file"
+    mode: str = "backend"
 
 class InventoryRequest(BaseModel):
     country: str = "MX"
@@ -28,11 +28,15 @@ class ListingCard(BaseModel):
     title: str
     item_id: Optional[str] = None
     product_id: Optional[str] = None  # For /p/MLM URLs (product catalog)
+    up_id: Optional[str] = None  # For /up/MLMU URLs (unified product)
+    channel_item_id: str = ""  # Computed from item_id/product_id/up_id with priority
+    id_source: str = "hash"  # One of: "item_id", "product_id", "up_id", "hash"
     needs_enrichment: bool = False   # True if only product_id available (need detail scrape)
     seller_id: Optional[int] = None
     price_mxn: Optional[float] = None
     currency: str = "MXN"
     filtered_out: bool = False  # Marked True if filtered by relevance
+    filtered_reasons: List[str] = Field(default_factory=list)  # Explanation for filtering
 
 class NormalizedItem(BaseModel):
     source: str = "mercadolibre_scrape"

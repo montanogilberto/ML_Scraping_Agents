@@ -1,19 +1,24 @@
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from pydantic import TypeAdapter
 from google.adk.tools.function_tool import FunctionTool
 from ...config.settings import load_settings
 from ...models.schemas import NormalizedItem, SellerRef, ListingCard
 from .http_client import HttpClient
 from .parsers import (
-    parse_list_page, parse_next_url, parse_item_page, 
+    parse_list_page, parse_next_url, parse_item_page,
     seller_list_url, seller_list_url_v2, seller_category_url,
     extract_cards_from_listing_html,
-    validate_and_filter_cards,
-    compute_card_stats,
     resolve_click_tracker_url,
-    is_click_tracker_url
+    is_click_tracker_url,
+    # Three-layer decision architecture
+    extract_ids,
+    compute_channel_item_id,
+    classify_filter,
+    compute_needs_enrichment,
+    assemble_card,
+    compute_card_stats_v2,
 )
 
 def now_utc():
@@ -33,7 +38,9 @@ def ml_scrape_category(category_url: str, max_pages: int = 3) -> Dict[str, Any]:
         "cards_valid": 0,
         "cards_missing_title": 0,
         "cards_missing_id": 0,
-        "cards_filtered_out": 0
+        "cards_filtered_out": 0,
+        "cards_needs_enrichment": 0,
+        "cards_ready": 0
     }
     
     for _ in range(max_pages):
@@ -42,17 +49,31 @@ def ml_scrape_category(category_url: str, max_pages: int = 3) -> Dict[str, Any]:
         # Use new robust card extraction
         raw_cards = extract_cards_from_listing_html(html)
         
-        # Validate and filter cards
-        filtered_cards, card_stats = validate_and_filter_cards(raw_cards, category_url)
+        # Process each card with the new 3-layer architecture
+        processed_cards = []
+        for card in raw_cards:
+            # Use assemble_card for full processing
+            processed_card = assemble_card(
+                permalink=card.get("permalink", ""),
+                title=card.get("title", ""),
+                price_mxn=card.get("price_mxn"),
+                currency=card.get("currency", "MXN"),
+                seller_id=card.get("seller_id"),
+                allow_refurbished=False,  # Default: filter out refurbished
+                allow_bundles=False,       # Default: filter out bundles
+                allow_locked=False         # Default: filter out locked phones
+            )
+            processed_cards.append(processed_card)
         
         # Aggregate stats
-        all_stats["cards_total"] += card_stats["total"]
-        all_stats["cards_valid"] += card_stats["valid"]
-        all_stats["cards_missing_title"] += card_stats["missing_title"]
-        all_stats["cards_missing_id"] += card_stats["missing_item_id"]
-        all_stats["cards_filtered_out"] += card_stats["filtered_out"]
+        page_stats = compute_card_stats_v2(processed_cards)
+        all_stats["cards_total"] += page_stats["total"]
+        all_stats["cards_valid"] += page_stats["valid"]
+        all_stats["cards_filtered_out"] += page_stats["filtered_out"]
+        all_stats["cards_needs_enrichment"] += page_stats["needs_enrichment"]
+        all_stats["cards_ready"] += page_stats["ready"]
         
-        all_cards.extend(filtered_cards)
+        all_cards.extend(processed_cards)
         
         # Extract sellers using legacy parser (for backward compat)
         _, seller_refs = parse_list_page(html, source_url=url)
@@ -66,15 +87,25 @@ def ml_scrape_category(category_url: str, max_pages: int = 3) -> Dict[str, Any]:
     
     # Deduplicate by permalink
     cards_uniq = {c["permalink"]: c for c in all_cards}
-    cards_out = TypeAdapter(List[ListingCard]).validate_python(list(cards_uniq.values()))
+    all_cards_list = list(cards_uniq.values())
+
+    # Recompute final stats after dedup (covers all cards including filtered)
+    final_stats = compute_card_stats_v2(all_cards_list)
+
+    # Validate all cards through Pydantic
+    cards_out = TypeAdapter(List[ListingCard]).validate_python(all_cards_list)
     sellers_out = TypeAdapter(List[SellerRef]).validate_python(list(sellers.values()))
-    
-    # Recompute final stats after dedup
-    final_stats = compute_card_stats(list(cards_uniq.values()))
-    
+
+    # Return ONLY valid cards (filtered_out=False) in the cards array.
+    # This includes catalog products (item_id=null, product_id=MLM...) which are
+    # valid listings that need enrichment — they must NOT be excluded.
+    # filtered_out=True cards (refurbished, accessories, etc.) are excluded here;
+    # their counts are still visible in stats.filtered_out.
+    valid_cards = [c for c in cards_out if not c.filtered_out]
+
     return {
         "category_url": category_url,
-        "cards": [c.model_dump() for c in cards_out],
+        "cards": [c.model_dump() for c in valid_cards],
         "sellers": [s.model_dump() for s in sellers_out],
         "stats": final_stats
     }
@@ -118,9 +149,9 @@ def ml_scrape_seller_inventory(
     all_stats = {
         "cards_total": 0,
         "cards_valid": 0,
-        "cards_missing_title": 0,
-        "cards_missing_id": 0,
         "cards_filtered_out": 0,
+        "cards_needs_enrichment": 0,
+        "cards_ready": 0,
         "cards_click_tracker_resolved": 0
     }
     
@@ -150,30 +181,32 @@ def ml_scrape_seller_inventory(
                 card["original_url"] = card["permalink"]
                 card["permalink"] = resolved_url
                 all_stats["cards_click_tracker_resolved"] += 1
-                
-                # Re-extract item_id from resolved URL
-                if card.get("item_id") is None:
-                    # Re-parse the resolved URL for item_id
-                    item_id, product_id, needs_enrichment = _extract_item_id_from_url(resolved_url)
-                    card["item_id"] = item_id
-                    card["product_id"] = product_id
-                    card["needs_enrichment"] = needs_enrichment
         
-        # Validate and filter cards
-        filtered_cards, card_stats = validate_and_filter_cards(raw_cards, primary_url)
+        # Process each card with the new 3-layer architecture
+        # Pass seller_id since we know it from the context
+        processed_cards = []
+        for card in raw_cards:
+            processed_card = assemble_card(
+                permalink=card.get("permalink", ""),
+                title=card.get("title", ""),
+                price_mxn=card.get("price_mxn"),
+                currency=card.get("currency", "MXN"),
+                seller_id=seller_id,  # We know the seller from the scrape context
+                allow_refurbished=False,  # Default: filter out refurbished
+                allow_bundles=False,       # Default: filter out bundles
+                allow_locked=False         # Default: filter out locked phones
+            )
+            processed_cards.append(processed_card)
         
         # Aggregate stats
-        all_stats["cards_total"] += card_stats["total"]
-        all_stats["cards_valid"] += card_stats["valid"]
-        all_stats["cards_missing_title"] += card_stats["missing_title"]
-        all_stats["cards_missing_id"] += card_stats["missing_item_id"]
-        all_stats["cards_filtered_out"] += card_stats["filtered_out"]
+        page_stats = compute_card_stats_v2(processed_cards)
+        all_stats["cards_total"] += page_stats["total"]
+        all_stats["cards_valid"] += page_stats["valid"]
+        all_stats["cards_filtered_out"] += page_stats["filtered_out"]
+        all_stats["cards_needs_enrichment"] += page_stats["needs_enrichment"]
+        all_stats["cards_ready"] += page_stats["ready"]
         
-        # Add seller_id to each card
-        for c in filtered_cards:
-            c["seller_id"] = seller_id
-        
-        out.extend(filtered_cards)
+        out.extend(processed_cards)
         nxt = parse_next_url(html)
         if not nxt:
             break
@@ -182,53 +215,29 @@ def ml_scrape_seller_inventory(
     # Deduplicate by permalink
     cards_uniq = {c["permalink"]: c for c in out}
     card_count = len(cards_uniq)
-    
-    # Limit cards to max_cards (avoid context overflow)
-    cards_limited = list(cards_uniq.values())[:max_cards]
-    
-    # Return sample_permalink for backward compatibility + limited cards
-    sample_permalink = cards_limited[0]["permalink"] if cards_limited else None
-    
-    # Recompute final stats after dedup
-    final_stats = compute_card_stats(cards_limited)
+    all_cards_list = list(cards_uniq.values())
+
+    # Recompute final stats after dedup (covers all cards including filtered)
+    final_stats = compute_card_stats_v2(all_cards_list)
     final_stats["cards_click_tracker_resolved"] = all_stats["cards_click_tracker_resolved"]
-    
+
+    # Return ONLY valid cards (filtered_out=False), limited to max_cards.
+    # Catalog products (item_id=null, product_id=MLM...) are valid and included.
+    valid_cards = [c for c in all_cards_list if not c.get("filtered_out", False)]
+    cards_limited = valid_cards[:max_cards]
+
+    # sample_permalink: first valid card's URL (used by ItemExtractor)
+    sample_permalink = cards_limited[0]["permalink"] if cards_limited else None
+
     return {
-        "seller_id": seller_id, 
-        "seller_url": primary_url, 
-        "card_count": card_count, 
+        "seller_id": seller_id,
+        "seller_url": primary_url,
+        "card_count": card_count,
         "cards": cards_limited,
         "sample_permalink": sample_permalink,
         "stats": final_stats
     }
 
-
-def _extract_item_id_from_url(url: str):
-    """Helper to extract item_id from URL - used in click tracker resolution."""
-    import re
-    ITEM_ID_RE = re.compile(r"(MLM\d{6,15})")
-    PRODUCT_ID_RE = re.compile(r"/p/(MLM\d+)")
-    
-    if not url:
-        return None, None, False
-    
-    # Check for /p/MLMxxxx (product catalog URL)
-    product_match = PRODUCT_ID_RE.search(url)
-    if product_match:
-        product_id = product_match.group(1)
-        if "/p/" in url:
-            return None, product_id, True
-        item_match = ITEM_ID_RE.search(url)
-        if item_match:
-            return item_match.group(1), product_id, False
-        return None, product_id, True
-    
-    # Check for standard listing URL /MLMxxxx
-    item_match = ITEM_ID_RE.search(url)
-    if item_match:
-        return item_match.group(1), None, False
-    
-    return None, None, False
 
 @FunctionTool
 def ml_scrape_item_detail(url: str) -> Dict[str, Any]:
@@ -267,3 +276,257 @@ def ml_persist_items(items: List[Dict[str, Any]], mode: str = "file") -> Dict[st
         )
         return {"ok":r.ok,"status_code":r.status_code,"body":(r.text[:1000] if r.text else ""), "count":len(norm)}
     return {"ok":False,"error":f"Unknown mode: {mode}"}
+
+
+@FunctionTool
+def ml_get_all_sell_listings() -> Dict[str, Any]:
+    """
+    Fetch every sell listing stored in the backend database.
+
+    Use this to validate whether scraped products already exist in the DB
+    before exporting new listings.
+
+    Calls: GET /all_sellListings
+
+    Returns:
+        {
+            "ok": bool,
+            "total": int,
+            "sellListings": [
+                {
+                    "sellListingId": int,
+                    "channel": str,
+                    "market": str,
+                    "channelItemId": str,
+                    "title": str,
+                    "sellPriceOriginal": float,
+                    "currencyOriginal": str,
+                    "sellPriceUsd": float,
+                    "fxRateToUsd": float,
+                    "fxAsOfDate": str,
+                    "fulfillmentType": str | None,
+                    "listingTimestamp": str,
+                    "unifiedProductId": int | None,
+                    "createdAt": str,
+                    "updatedAt": str
+                },
+                ...
+            ]
+        }
+    """
+    from ...api.backend_api import BackendApiClient
+
+    settings = load_settings()
+    client = BackendApiClient(
+        base_url=settings.backend_base_url,
+        worker_key=settings.backend_worker_key,
+        timeout_sec=settings.http_timeout_sec,
+    )
+    try:
+        data = client.get_all_sell_listings()
+        listings = data.get("sellListings", [])
+        return {
+            "ok": True,
+            "total": len(listings),
+            "sellListings": listings,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "sellListings": []}
+
+
+@FunctionTool
+def ml_query_sell_listings(
+    channel: str,
+    market: str,
+    page: int = 1,
+    page_size: int = 50,
+) -> Dict[str, Any]:
+    """
+    Query sell listings from the backend database with channel/market filters
+    and pagination.
+
+    Use this to check whether specific scraped products (by channel + market)
+    already exist in the DB before exporting.
+
+    Calls: POST /query_sellListings
+
+    Args:
+        channel:   Sales channel, e.g. "mercadolibre", "amazon"
+        market:    Market code, e.g. "MX", "US"
+        page:      Page number (1-based). Default: 1
+        page_size: Records per page. Default: 50
+
+    Returns:
+        {
+            "ok": bool,
+            "total_rows": int,
+            "page": int,
+            "page_size": int,
+            "sellListingsQuery": [
+                {
+                    "totalRows": int,
+                    "page": int,
+                    "pageSize": int,
+                    "sellListingId": int,
+                    "channel": str,
+                    "market": str,
+                    "channelItemId": str,
+                    "title": str,
+                    "sellPriceOriginal": float,
+                    "currencyOriginal": str,
+                    "sellPriceUsd": float,
+                    "fxRateToUsd": float,
+                    "fxAsOfDate": str,
+                    "fulfillmentType": str | None,
+                    "listingTimestamp": str,
+                    "unifiedProductId": int | None,
+                    "createdAt": str,
+                    "updatedAt": str
+                },
+                ...
+            ]
+        }
+    """
+    from ...api.backend_api import BackendApiClient
+
+    settings = load_settings()
+    client = BackendApiClient(
+        base_url=settings.backend_base_url,
+        worker_key=settings.backend_worker_key,
+        timeout_sec=settings.http_timeout_sec,
+    )
+    try:
+        data = client.query_sell_listings(
+            channel=channel,
+            market=market,
+            page=page,
+            page_size=page_size,
+        )
+        rows = data.get("sellListingsQuery", [])
+        total_rows = rows[0].get("totalRows", len(rows)) if rows else 0
+        return {
+            "ok": True,
+            "total_rows": total_rows,
+            "page": page,
+            "page_size": page_size,
+            "sellListingsQuery": rows,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "sellListingsQuery": []}
+
+
+@FunctionTool
+def ml_export_sell_listings(
+    items: Optional[List[Dict[str, Any]]] = None,
+    path: str = "out.ndjson",
+    dry_run: bool = False
+) -> Dict[str, Any]:
+    """
+    Export scraped items to the sellListings backend API.
+
+    Accepts items either directly (in-memory list) or from an NDJSON file.
+    Transforms MercadoLibre items into the format required by the backend SQL
+    Server stored procedure sp_sellListings (UPSERT action).
+
+    Args:
+        items: Optional list of scraped item dicts passed directly from the pipeline
+               (e.g. items_raw.items). When provided, the file at `path` is ignored.
+        path: Path to the NDJSON file to read when `items` is not provided.
+              Default: "out.ndjson"
+        dry_run: If True, only transform and return a preview without POSTing to backend.
+                 Default: False (perform actual POST)
+
+    Returns:
+        Dictionary with export status, counts, and preview of first few records.
+        For dry_run=True: Returns payload preview.
+        For dry_run=False: Returns backend response and summary.
+    """
+    from ...export.export_sell_listings import (
+        read_ndjson,
+        build_sell_listings_payload,
+        export_sell_listings,
+    )
+
+    # Load settings
+    settings = load_settings()
+
+    # Resolve items: prefer in-memory list, fall back to reading from file
+    if items is not None:
+        if not items:
+            return {"ok": False, "error": "Empty items list provided"}
+    else:
+        try:
+            items = read_ndjson(path)
+        except FileNotFoundError:
+            return {"ok": False, "error": f"File not found: {path}"}
+        except Exception as e:
+            return {"ok": False, "error": f"Failed to read NDJSON: {str(e)}"}
+
+        if not items:
+            return {"ok": False, "error": "No items found in input file"}
+    
+    # Build the sellListings payload
+    payload_result = build_sell_listings_payload(
+        items=items,
+        fx_rate_to_usd=settings.fx_rate_to_usd
+    )
+    
+    metadata = payload_result.get("_metadata", {})
+    sell_listings = payload_result.get("sellListings", [])
+    
+    # Return preview for dry run
+    if dry_run:
+        preview = sell_listings[:2] if len(sell_listings) > 2 else sell_listings
+        return {
+            "ok": True,
+            "dry_run": True,
+            "total_items": metadata.get("total", 0),
+            "emitted": metadata.get("emitted", 0),
+            "skipped": metadata.get("skipped", 0),
+            "fx_rate_to_usd": metadata.get("fx_rate_to_usd"),
+            "fx_as_of_date": metadata.get("fx_as_of_date"),
+            "backend_url": settings.sell_listings_backend_url,
+            "preview": preview,
+            "note": "This is a dry run - no data was sent to backend"
+        }
+    
+    # Perform actual export
+    if not sell_listings:
+        return {
+            "ok": False,
+            "error": "No valid items to export after transformation",
+            "skipped": metadata.get("skipped", 0)
+        }
+    
+    # Export to backend
+    try:
+        # Prepare payload (without metadata)
+        export_payload = {"sellListings": sell_listings}
+        
+        result = export_sell_listings(
+            payload=export_payload,
+            url=settings.sell_listings_backend_url,
+            worker_key=settings.backend_worker_key,
+            timeout_sec=settings.http_timeout_sec
+        )
+        
+        return {
+            "ok": result.get("ok", False),
+            "status_code": result.get("status_code"),
+            "exported_count": result.get("exported_count", 0),
+            "total_items": metadata.get("total", 0),
+            "emitted": metadata.get("emitted", 0),
+            "skipped": metadata.get("skipped", 0),
+            "backend_response": result.get("response"),
+            "fx_rate_to_usd": metadata.get("fx_rate_to_usd"),
+            "fx_as_of_date": metadata.get("fx_as_of_date")
+        }
+        
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"Export failed: {str(e)}",
+            "total_items": metadata.get("total", 0),
+            "emitted": metadata.get("emitted", 0),
+            "skipped": metadata.get("skipped", 0)
+        }
