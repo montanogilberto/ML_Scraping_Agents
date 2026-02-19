@@ -113,6 +113,53 @@ Each agent performs a specialized task with its own model, tools, and output key
                └────────────────────────┘
 ```
 
+## Data Flow Lifecycle
+---
+```
+MercadoLibre HTML
+       │
+       ▼
+Category Page Scrape
+       │
+       ▼
+ListingCard Extraction
+       │
+       ├─ extract_ids()
+       ├─ compute_channel_item_id()
+       ├─ classify_filter()
+       └─ compute_needs_enrichment()
+       │
+       ▼
+Seller Inventory Expansion
+       │
+       ▼
+Item Detail Enrichment
+       │
+       ▼
+NormalizedItem
+       │
+       ▼
+QARefiner Agent
+       │
+       ├─ validates schema
+       ├─ computes statistics
+       └─ flags anomalies
+       │
+       ▼
+Exporter Agent
+       │
+       ├─ fetch FX rate from backend
+       ├─ compute sellPriceUsd
+       ├─ deduplicate existing listings
+       │
+       ▼
+POST /sellListings
+       │
+       ▼
+Azure SQL Database
+
+```
+
 ---
 
 ## Project Structure
