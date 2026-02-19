@@ -24,7 +24,7 @@ Built using:
 - **BeautifulSoup + lxml** — HTML parsing
 - **Pydantic v2** — data validation and schema enforcement
 - **Tenacity** — retry logic with exponential backoff
-- **SmartLoans Backend** — Azure-hosted FastAPI (`smartloansbackend.azurewebsites.net`)
+- **Backend** — Azure-hosted FastAPI 
 
 ---
 
