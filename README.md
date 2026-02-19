@@ -262,14 +262,14 @@ PERSIST_MODE=backend
 OUT_NDJSON=out.ndjson
 
 # ── SmartLoans Backend ─────────────────────────────────────────────────────
-BACKEND_BASE_URL=https://smartloansbackend.azurewebsites.net
+BACKEND_BASE_URL=
 BACKEND_WORKER_KEY=<your-worker-key>
 
 # ── Vertex AI / Gemini Credentials ────────────────────────────────────────
 GOOGLE_GENAI_USE_VERTEXAI=1
-GOOGLE_CLOUD_PROJECT=agent-gcp-2026-487121
-GOOGLE_CLOUD_LOCATION=us-central1
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/agent-gcp-2026-487121-service-account.json
+GOOGLE_CLOUD_PROJECT=
+GOOGLE_CLOUD_LOCATION=
+GOOGLE_APPLICATION_CREDENTIALS=
 ```
 
 ### 5. Vertex AI service account
