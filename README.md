@@ -1,4 +1,4 @@
-# SmartLoans – MercadoLibre Inventory Scraping (ADK Multi-Agent)
+MercadoLibre Inventory Scraping (ADK Multi-Agent)
 
 Enterprise-grade multi-agent scraping pipeline built with **Google's Agent Development Kit (ADK)** and **Gemini 2.5 Pro** (Vertex AI) to extract, validate, enrich, and export MercadoLibre Mexico inventory data into the SmartLoans backend.
 
