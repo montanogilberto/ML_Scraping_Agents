@@ -1,0 +1,8 @@
+google-adk
+python-dotenv
+requests
+pydantic
+tenacity
+beautifulsoup4
+lxml
+litellm

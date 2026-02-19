@@ -1,0 +1,23 @@
+cat > .gitignore <<'EOF'
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Env / secrets
+.env
+*.json
+
+# ADK artifacts
+.adk/
+agents/**/.adk/
+*.db
+
+# Outputs
+*.ndjson
+*.log
+
+# OS/IDE
+.DS_Store
+.vscode/
+EOF
