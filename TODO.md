@@ -1,17 +1,12 @@
-# TODO: Vertex AI / Gemini Migration
+# TODO: Fix "Model gpt-4o not found" error
 
-## Steps
+## Issue
+Google ADK doesn't automatically recognize OpenAI models like `gpt-4o`. They need to be prefixed with the provider (e.g., `openai/gpt-4o`).
 
-- [x] 1. Update `agents/ml_inventory/config/settings.py`:
-  - [x] Add Vertex AI credential fields (google_genai_use_vertexai, google_cloud_project, google_cloud_location, google_application_credentials)
-  - [x] Change model defaults to `gemini-2.5-pro`
-  - [x] Change persist_mode default to `backend`
-  - [x] Add model_post_init to propagate Vertex AI env vars
+## Plan
+- [x] 1. Update `settings.py` - Change model defaults to use prefixed format
+- [x] 2. Update `inventory_pipeline.py` - Update fallback model constants
 
-- [x] 2. Update `.env`:
-  - [x] Change MODEL_PLANNER, MODEL_COLLECTOR, MODEL_QA to `gemini-2.5-pro`
-  - [x] Change PERSIST_MODE to `backend`
-  - [x] Fix GOOGLE_APPLICATION_CREDENTIALS to macOS path
+## Status: Completed
 
-## Status
-- [x] All steps complete
+

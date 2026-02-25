@@ -461,12 +461,34 @@ def parse_item_page(html: str, url: str) -> Dict[str, Any]:
     """
     Parse individual item detail page.
     Extract full item details including item_id, seller_id, price, etc.
+
+    Uses extract_ids() (three-layer architecture) to correctly handle all URL
+    types: articulo (item_id), /p/ catalog (product_id), /up/ unified (up_id).
     """
     soup = BeautifulSoup(html, "lxml")
-    
-    # Extract item_id and product_id from URL
-    item_id, product_id, needs_enrichment = extract_item_id_from_url(url)
-    
+
+    # --- Identity extraction (supports item_id, product_id, up_id) ---
+    ids = extract_ids(url)
+    item_id = ids["item_id"]
+    product_id = ids["product_id"]
+    up_id = ids["up_id"]
+    is_catalog_product = ids["is_catalog_product"]
+    is_up_product = ids["is_up_product"]
+
+    # Compute stable channel_item_id and id_source
+    channel_item_id, id_source = compute_channel_item_id(
+        item_id, product_id, up_id, url
+    )
+
+    # needs_enrichment: True when we don't have a direct item_id or seller_id
+    # (seller_id is always None at this stage — detail page may reveal it later)
+    needs_enrichment = compute_needs_enrichment(
+        item_id=item_id,
+        seller_id=None,
+        is_catalog_product=is_catalog_product,
+        is_up_product=is_up_product,
+    )
+
     # Extract title
     title = None
     if soup.find("h1"):
@@ -475,7 +497,7 @@ def parse_item_page(html: str, url: str) -> Dict[str, Any]:
         title = soup.find("title").get_text(strip=True)
     if not title:
         title = "unknown"
-    
+
     # Extract price
     price_mxn = None
     price_selectors = [
@@ -492,16 +514,19 @@ def parse_item_page(html: str, url: str) -> Dict[str, Any]:
                 break
             except ValueError:
                 continue
-    
+
     # Extract condition
     condition = None
     condition_el = soup.select_one("span.andes-badge, span[itemprop='condition']")
     if condition_el:
         condition = condition_el.get_text(strip=True).lower()
-    
-    # Extract pictures and attributes from ld+json
+
+    # Extract pictures, brand, and attributes from ld+json
+    # NOTE: needs_enrichment is (re)computed AFTER this block so that
+    # JSON-LD presence can override the URL-type-based rules above.
     attributes = None
     pictures = None
+    brand = None
     for s in soup.find_all("script"):
         if "ld+json" not in (s.get("type") or "").lower():
             continue
@@ -516,20 +541,42 @@ def parse_item_page(html: str, url: str) -> Dict[str, Any]:
                     pictures = [str(x) for x in img]
                 elif isinstance(img, str):
                     pictures = [img]
+                # Extract brand from JSON-LD
+                brand_raw = data.get("brand")
+                if isinstance(brand_raw, dict):
+                    brand = brand_raw.get("name")
+                elif isinstance(brand_raw, str):
+                    brand = brand_raw
                 break
         except Exception:
             continue
-    
+
+    # CRITICAL FIX (ISSUE 2): Recompute needs_enrichment now that we know
+    # whether JSON-LD data was found.  If JSON-LD is present the item has
+    # been fully enriched — force needs_enrichment=False regardless of URL type.
+    has_jsonld = attributes is not None
+    needs_enrichment = compute_needs_enrichment(
+        item_id=item_id,
+        seller_id=None,
+        is_catalog_product=is_catalog_product,
+        is_up_product=is_up_product,
+        has_jsonld=has_jsonld,
+    )
+
     return {
         "permalink": url,
         "title": title,
         "item_id": item_id,
         "product_id": product_id,
+        "up_id": up_id,
+        "channel_item_id": channel_item_id,
+        "id_source": id_source,
         "needs_enrichment": needs_enrichment,
         "seller_id": None,
         "price_mxn": price_mxn,
         "currency": "MXN",
         "condition": condition,
+        "brand": brand,
         "pictures": pictures,
         "attributes": attributes,
         "raw_snippet": html[:2500],
@@ -631,36 +678,36 @@ def compute_channel_item_id(
 ) -> Tuple[str, str]:
     """
     LAYER 1 (continued): Compute channel_item_id with priority rules
-    
-    Priority: product_id → item_id → up_id → SHA1(permalink)
-    
+
+    Priority: product_id → up_id → item_id → SHA1(permalink)
+
     Args:
         item_id: Standard listing ID
         product_id: Product catalog ID
         up_id: Unified product ID
         permalink: Full URL for hash fallback
-        
+
     Returns:
         Tuple of (channel_item_id, id_source)
-        id_source is one of: "item_id", "product_id", "up_id", "hash"
+        id_source is one of: "product_id", "up_id", "item_id", "hash"
     """
-    # Priority 1: product_id (catalog URLs)
+    # Priority 1: product_id (catalog /p/ URLs)
     if product_id:
         return product_id, "product_id"
-    
-    # Priority 2: item_id (standard listing URLs)
-    if item_id:
-        return item_id, "item_id"
-    
-    # Priority 3: up_id (unified product URLs)
+
+    # Priority 2: up_id (unified /up/ URLs)
     if up_id:
         return up_id, "up_id"
-    
-    # Priority 4: SHA1 hash of permalink
+
+    # Priority 3: item_id (standard articulo/direct listing URLs)
+    if item_id:
+        return item_id, "item_id"
+
+    # Priority 4: SHA1 hash of permalink (last resort — always stable)
     if permalink:
         sha1_hash = hashlib.sha1(permalink.encode('utf-8')).hexdigest()
         return sha1_hash, "hash"
-    
+
     # Fallback: empty string (will be filtered later)
     return "", "hash"
 
@@ -772,6 +819,7 @@ def compute_needs_enrichment(
     seller_id: Optional[int],
     is_catalog_product: bool,
     is_up_product: bool,
+    has_jsonld: bool = False,
 ) -> bool:
     """
     LAYER 2: Enrichment Decision Layer
@@ -780,7 +828,9 @@ def compute_needs_enrichment(
     obtain complete data.  This is a PIPELINE CONTINUATION decision, not a
     filtering decision.  needs_enrichment MUST NOT affect filtered_out.
 
-    Rules (any True → needs_enrichment = True):
+    Rules:
+      0. has_jsonld=True → enrichment already complete; return False immediately.
+         (JSON-LD data is only present after ml_scrape_item_detail has run.)
       1. item_id is None  — no direct listing ID; enrichment needed to resolve it
       2. seller_id is None — seller identity unknown; enrichment needed
       3. is_catalog_product — /p/ URLs aggregate multiple sellers; always enrich
@@ -791,10 +841,19 @@ def compute_needs_enrichment(
         seller_id: Seller ID if known from scrape context, else None
         is_catalog_product: True when URL contains /p/ (catalog page)
         is_up_product: True when URL contains /up/ (unified product page)
+        has_jsonld: True when JSON-LD data was successfully extracted from the
+                    item detail page — signals that enrichment is complete.
 
     Returns:
         True if listing needs enrichment, False if all required data is present
     """
+    # Rule 0: JSON-LD present → enrichment is complete regardless of URL type.
+    # This is the primary fix for the "needs_enrichment stays True after
+    # ml_scrape_item_detail" bug: catalog and UP products always had
+    # needs_enrichment=True because rules 3/4 fired unconditionally.
+    if has_jsonld:
+        return False
+
     # Rule 1: No direct item_id → must enrich to resolve listing details
     if item_id is None:
         return True

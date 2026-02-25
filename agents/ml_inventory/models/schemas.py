@@ -44,11 +44,15 @@ class NormalizedItem(BaseModel):
     title: str
     item_id: Optional[str] = None
     product_id: Optional[str] = None  # For /p/MLM URLs (product catalog)
-    needs_enrichment: bool = False   # True if only product_id available (need detail scrape)
+    up_id: Optional[str] = None       # For /up/MLMU URLs (unified product)
+    channel_item_id: str = ""         # Computed stable ID (product_id > up_id > item_id > SHA1)
+    id_source: str = "hash"           # One of: "product_id", "up_id", "item_id", "hash"
+    needs_enrichment: bool = False    # True if enrichment step is needed; False after JSON-LD found
     seller_id: Optional[int] = None
     price_mxn: Optional[float] = None
     currency: str = "MXN"
     condition: Optional[str] = None
+    brand: Optional[str] = None       # Extracted from JSON-LD brand field
     pictures: Optional[List[str]] = None
     attributes: Optional[Dict[str, Any]] = None
     raw_snippet: Optional[str] = None

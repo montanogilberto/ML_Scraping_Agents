@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from pydantic import TypeAdapter
@@ -20,6 +21,8 @@ from .parsers import (
     assemble_card,
     compute_card_stats_v2,
 )
+
+logger = logging.getLogger(__name__)
 
 def now_utc():
     """Generate UTC timestamp in ISO format."""
@@ -241,13 +244,42 @@ def ml_scrape_seller_inventory(
 
 @FunctionTool
 def ml_scrape_item_detail(url: str) -> Dict[str, Any]:
-    html=_client.get_html(url)
-    item=parse_item_page(html,url)
-    out=TypeAdapter(NormalizedItem).validate_python(item)
-    return out.model_dump()
+    """
+    Scrape an item detail page and return a NormalizedItem dict.
+
+    Supports all MercadoLibre URL types:
+      - articulo.mercadolibre.com.mx/MLM-XXXXXXXX  (item_id)
+      - mercadolibre.com.mx/.../p/MLMxxxxxxxx       (product_id / catalog)
+      - mercadolibre.com.mx/.../up/MLMUxxxxxxxx     (up_id / unified product)
+
+    Always returns a dict — never raises.  On failure, returns:
+      {"ok": False, "error": "<message>", "url": "<url>", "permalink": "<url>"}
+    so the caller can log the error and continue processing other items.
+    """
+    import logging as _logging
+    import re as _re
+    _log = _logging.getLogger("ml_scrape_item_detail")
+
+    # Normalise LLM-mangled URLs where "://" was dropped and replaced with ".".
+    # e.g. "https.mercadolibre.com.mx/..." → "https://mercadolibre.com.mx/..."
+    url = _re.sub(r'^(https?)\.', r'\1://', url)
+
+    try:
+        html = _client.get_html(url)
+        item = parse_item_page(html, url)
+        out = TypeAdapter(NormalizedItem).validate_python(item)
+        return out.model_dump()
+    except Exception as exc:
+        _log.warning("ml_scrape_item_detail failed for %s: %s", url, exc)
+        return {
+            "ok": False,
+            "error": str(exc),
+            "url": url,
+            "permalink": url,
+        }
 
 @FunctionTool
-def ml_persist_items(items: List[Dict[str, Any]], mode: str = "file") -> Dict[str, Any]:
+def ml_persist_items(items: List[Dict[str, Any]], mode: str = "") -> Dict[str, Any]:
     # Add captured_at_utc if missing from any item
     timestamp = now_utc()
     for item in items:
@@ -428,32 +460,54 @@ def ml_export_sell_listings(
     Transforms MercadoLibre items into the format required by the backend SQL
     Server stored procedure sp_sellListings (UPSERT action).
 
+    Supports all three MercadoLibre identity types:
+      - product_id  (/p/MLMxxxxx  — catalog product pages)
+      - up_id       (/up/MLMUxxxx — unified product pages)
+      - item_id     (articulo listing pages)
+
     Args:
-        items: Optional list of scraped item dicts passed directly from the pipeline
-               (e.g. items_raw.items). When provided, the file at `path` is ignored.
-        path: Path to the NDJSON file to read when `items` is not provided.
-              Default: "out.ndjson"
-        dry_run: If True, only transform and return a preview without POSTing to backend.
+        items:   Optional list of scraped item dicts from the pipeline
+                 (e.g. items_raw.items). When provided, `path` is ignored.
+        path:    Path to the NDJSON file to read when `items` is not provided.
+                 Default: "out.ndjson"
+        dry_run: If True, only transform and return a preview without POSTing.
                  Default: False (perform actual POST)
 
     Returns:
-        Dictionary with export status, counts, and preview of first few records.
-        For dry_run=True: Returns payload preview.
-        For dry_run=False: Returns backend response and summary.
+        dry_run=True  → payload preview with skip_reasons
+        dry_run=False → {ok, as_of, existing_count, new_count, skipped, skip_reasons}
     """
     from ...export.export_sell_listings import (
         read_ndjson,
         build_sell_listings_payload,
-        export_sell_listings,
+        export_sell_listings as _export_sell_listings,
     )
 
-    # Load settings
     settings = load_settings()
 
-    # Resolve items: prefer in-memory list, fall back to reading from file
+    # ------------------------------------------------------------------
+    # Resolve items: prefer in-memory list, fall back to NDJSON file
+    # ------------------------------------------------------------------
+    # DEBUG: Log what we're receiving
+    logger.info(f"ml_export_sell_listings called with items={items is not None}, path={path}")
+    
     if items is not None:
+        logger.info(f"Received items list with {len(items)} items")
+        # Log first item as sample
+        if items:
+            logger.info(f"Sample item keys: {list(items[0].keys()) if items else 'empty'}")
+            logger.info(f"Sample item: {json.dumps(items[0], ensure_ascii=False)[:500]}...")
         if not items:
-            return {"ok": False, "error": "Empty items list provided"}
+            return {
+                "ok": True,
+                "as_of": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                "skipped": True,
+                "reason": "no items to export",
+                "new_count": 0,
+                "existing_count": 0,
+                "skipped_count": 0,
+                "skip_reasons": {},
+            }
     else:
         try:
             items = read_ndjson(path)
@@ -464,18 +518,17 @@ def ml_export_sell_listings(
 
         if not items:
             return {"ok": False, "error": "No items found in input file"}
-    
-    # Build the sellListings payload
-    payload_result = build_sell_listings_payload(
-        items=items,
-        fx_rate_to_usd=settings.fx_rate_to_usd
-    )
-    
-    metadata = payload_result.get("_metadata", {})
-    sell_listings = payload_result.get("sellListings", [])
-    
-    # Return preview for dry run
+
+    # ------------------------------------------------------------------
+    # Dry-run: transform only, return preview (no HTTP POST)
+    # ------------------------------------------------------------------
     if dry_run:
+        payload_result = build_sell_listings_payload(
+            items=items,
+            fx_rate_to_usd=settings.fx_rate_to_usd,
+        )
+        metadata = payload_result.get("_metadata", {})
+        sell_listings = payload_result.get("sellListings", [])
         preview = sell_listings[:2] if len(sell_listings) > 2 else sell_listings
         return {
             "ok": True,
@@ -483,50 +536,54 @@ def ml_export_sell_listings(
             "total_items": metadata.get("total", 0),
             "emitted": metadata.get("emitted", 0),
             "skipped": metadata.get("skipped", 0),
+            "skip_reasons": metadata.get("skip_reasons", {}),
             "fx_rate_to_usd": metadata.get("fx_rate_to_usd"),
             "fx_as_of_date": metadata.get("fx_as_of_date"),
             "backend_url": settings.sell_listings_backend_url,
             "preview": preview,
-            "note": "This is a dry run - no data was sent to backend"
+            "note": "Dry run — no data sent to backend",
         }
+
+    # ------------------------------------------------------------------
+    # Live export: delegate to export_sell_listings(cards) which handles
+    # transformation, identity resolution, needs_enrichment check,
+    # existing-listing query (with retry + graceful degradation on 500),
+    # deduplication, and POST with exponential backoff.
+    # ------------------------------------------------------------------
+    logger.info("=" * 80)
+    logger.info("ML_EXPORT_SELL_LISTINGS - Starting export with %d items", len(items))
+    logger.info("=" * 80)
     
-    # Perform actual export
-    if not sell_listings:
-        return {
-            "ok": False,
-            "error": "No valid items to export after transformation",
-            "skipped": metadata.get("skipped", 0)
-        }
-    
-    # Export to backend
     try:
-        # Prepare payload (without metadata)
-        export_payload = {"sellListings": sell_listings}
+        result = _export_sell_listings(cards=items)
         
-        result = export_sell_listings(
-            payload=export_payload,
-            url=settings.sell_listings_backend_url,
-            worker_key=settings.backend_worker_key,
-            timeout_sec=settings.http_timeout_sec
+        # DEBUG: Log the result
+        logger.info("Export result: ok=%s, new_count=%d, existing_count=%d, skipped=%d",
+            result.get("ok"),
+            result.get("new_count", 0),
+            result.get("existing_count", 0),
+            result.get("skipped", 0)
         )
+        logger.info("Skip reasons: %s", result.get("skip_reasons", {}))
+        logger.info("=" * 80)
         
         return {
             "ok": result.get("ok", False),
-            "status_code": result.get("status_code"),
-            "exported_count": result.get("exported_count", 0),
-            "total_items": metadata.get("total", 0),
-            "emitted": metadata.get("emitted", 0),
-            "skipped": metadata.get("skipped", 0),
-            "backend_response": result.get("response"),
-            "fx_rate_to_usd": metadata.get("fx_rate_to_usd"),
-            "fx_as_of_date": metadata.get("fx_as_of_date")
+            "as_of": result.get("as_of"),
+            "existing_count": result.get("existing_count", 0),
+            "new_count": result.get("new_count", 0),
+            "skipped": result.get("skipped", 0),
+            "skip_reasons": result.get("skip_reasons", {}),
         }
-        
-    except Exception as e:
+    except Exception as exc:
+        logger.error("Export exception: %s", exc)
+        logger.info("=" * 80)
         return {
             "ok": False,
-            "error": f"Export failed: {str(e)}",
-            "total_items": metadata.get("total", 0),
-            "emitted": metadata.get("emitted", 0),
-            "skipped": metadata.get("skipped", 0)
+            "error": f"Export failed: {exc}",
+            "as_of": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "new_count": 0,
+            "existing_count": 0,
+            "skipped": len(items),
+            "skip_reasons": {"export_exception": len(items)},
         }

@@ -140,8 +140,8 @@ class BackendApiClient:
 
     @retry(
         retry=retry_if_exception_type((requests.RequestException,)),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential_jitter(initial=1, max=30),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential_jitter(initial=2, max=60),
         reraise=True,
     )
     def query_sell_listings(
@@ -205,12 +205,22 @@ class BackendApiClient:
             f"POST {url} — channel={channel}, market={market}, "
             f"page={page}, pageSize={page_size}"
         )
+        
+        # DEBUG: Log the query payload
+        logger.info("=" * 80)
+        logger.info("QUERY_PAYLOAD_DEBUG - Query payload being sent:")
+        logger.info("Query body: %s", json.dumps(body, ensure_ascii=False, indent=2))
+        logger.info("=" * 80)
+        
         response = requests.post(
             url,
             json=body,
             headers=self._json_headers(),
             timeout=self.timeout_sec,
         )
+        
+        # DEBUG: Log response status
+        logger.info("QUERY_RESPONSE_DEBUG - Status: %d", response.status_code)
         data = self._handle_response(response)
         rows = data.get("sellListingsQuery", [])
         logger.info(f"query_sell_listings returned {len(rows)} rows")
@@ -223,7 +233,7 @@ class BackendApiClient:
     @retry(
         retry=retry_if_exception_type((requests.RequestException,)),
         stop=stop_after_attempt(5),
-        wait=wait_exponential_jitter(initial=1, max=60),
+        wait=wait_exponential_jitter(initial=2, max=60),
         reraise=True,
     )
     def post_sell_listings(
@@ -251,6 +261,21 @@ class BackendApiClient:
         url = url_override or f"{self.base_url}/sellListings"
         count = len(payload.get("sellListings", []))
         logger.info(f"POST {url} — {count} listings")
+        
+        # DEBUG: Log the full payload for troubleshooting
+        logger.info("=" * 80)
+        logger.info("POST_PAYLOAD_DEBUG - Full payload being sent to backend:")
+        logger.info("=" * 80)
+        try:
+            payload_str = json.dumps(payload, ensure_ascii=False, indent=2)
+            # Truncate for logging if too large, but show more detail now
+            max_log_size = 10000  # Show up to 10k chars
+            if len(payload_str) > max_log_size:
+                payload_str = payload_str[:max_log_size] + f"\n... [truncated at {max_log_size} chars, total {len(payload_str)}]"
+            logger.info("Payload:\n%s", payload_str)
+        except Exception as e:
+            logger.warning(f"Failed to serialize payload for logging: {e}")
+        logger.info("=" * 80)
 
         response = requests.post(
             url,

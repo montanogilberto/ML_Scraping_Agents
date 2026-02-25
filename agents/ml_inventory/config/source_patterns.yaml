@@ -1,0 +1,187 @@
+# =============================================================================
+# Source URL Patterns Configuration
+# =============================================================================
+# This file defines regex patterns for different e-commerce sources.
+# Used to identify, categorize, and route URLs to appropriate scrapers.
+# =============================================================================
+
+sources:
+  # ---------------------------------------------------------------------------
+  # MercadoLibre (Mexico) - Currently supported
+  # ---------------------------------------------------------------------------
+  - name: mercadolibre
+    display_name: MercadoLibre México
+    domain: mercadolibre.com.mx
+    domain_pattern: "mercadolibre\\.com\\.mx"
+    enabled: true
+    
+    # URL patterns for item identification
+    url_patterns:
+      # Product catalog URL: /p/MLMxxxxxxxx
+      product_id:
+        regex: "/p/(MLM\\d+)"
+        example: "https://www.mercadolibre.com.mx/celular-samsung-galaxy-z-fold-7/p/MLM52050903"
+      
+      # Unified product URL: /up/MLMUxxxxxxxx
+      up_id:
+        regex: "/up/(MLMU\\d+)"
+        example: "https://www.mercadolibre.com.mx/samsung-galaxy-z-fold-7/up/MLMU1234567890"
+      
+      # Article/listing URL: /MLM-XXXXXXXXX or articulo.mercadolibre.com.mx/MLM-XXXXXXXXX
+      item_id:
+        regex: "(?:articulo\\.)?mercadolibre\\.com\\.mx/(?:MLM-)?(\\d{6,15})"
+        example: "https://articulo.mercadolibre.com.mx/MLM-1234567890"
+      
+      # Seller store URL
+      seller:
+        regex: "(?:listado\\.)?mercadolibre\\.com\\.mx/tienda/(\\d+)"
+        example: "https://listado.mercadolibre.com.mx/tienda/123456"
+    
+    # Category URL pattern
+    category_pattern: "listado\\.mercadolibre\\.com\\.mx/[a-z0-9-]+"
+    
+    # Search URL pattern
+    search_pattern: "listado\\.mercadolibre\\.com\\.mx/_ContainerId_"
+
+  # ---------------------------------------------------------------------------
+  # Samsung Mexico
+  # ---------------------------------------------------------------------------
+  - name: samsung
+    display_name: Samsung México
+    domain: samsung.com
+    domain_pattern: "samsung\\.com"
+    enabled: true
+    
+    url_patterns:
+      # Product page: /mx/smartphones/galaxy-s26-ultra/
+      product:
+        regex: "samsung\\.com/[^/]*/([^/]+)/?"
+        example: "https://www.samsung.com/mx/smartphones/galaxy-s26-ultra/"
+      
+      # Category page
+      category:
+        regex: "samsung\\.com/[^/]*/(smartphones|tablets|wearables)"
+        example: "https://www.samsung.com/mx/smartphones/"
+    
+    category_pattern: "samsung\\.com/[^/]*/(smartphones|tablets|wearables|audiovideo)"
+    search_pattern: "samsung\\.com/[^/]*/search"
+
+  # ---------------------------------------------------------------------------
+  # eBay
+  # ---------------------------------------------------------------------------
+  - name: ebay
+    display_name: eBay
+    domain: ebay.com
+    domain_pattern: "ebay\\.com"
+    enabled: true
+    
+    url_patterns:
+      # Search results: /sch/i.html?_nkw=keyword
+      search:
+        regex: "ebay\\.com/sch/i\\.html\\?.*_nkw=([^&]+)"
+        example: "https://www.ebay.com/sch/i.html?_nkw=samsung+s25"
+      
+      # Item listing: /itm/xxxxxxxxx
+      item:
+        regex: "ebay\\.com/itm/(\\d+)"
+        example: "https://www.ebay.com/itm/123456789012"
+      
+      # Store category
+      store:
+        regex: "ebay\\.com/str/([^/]+)"
+        example: "https://www.ebay.com/str/samsungstore"
+    
+    category_pattern: "ebay\\.com/sch/i\\.html"
+    search_pattern: "ebay\\.com/sch/i\\.html\\?.*_nkw="
+
+  # ---------------------------------------------------------------------------
+  # Amazon Mexico
+  # ---------------------------------------------------------------------------
+  - name: amazon
+    display_name: Amazon México
+    domain: amazon.com.mx
+    domain_pattern: "amazon\\.com\\.mx"
+    enabled: true
+    
+    url_patterns:
+      # Search results: /s?k=keyword
+      search:
+        regex: "amazon\\.com\\.mx/s\\?k=([^&]+)"
+        example: "https://www.amazon.com.mx/s?k=samsung+s25"
+      
+      # Product page: /dp/ASIN or /gp/product/ASIN
+      product:
+        regex: "amazon\\.com\\.mx/(?:dp|gp/product)/([A-Z0-9]{10})"
+        example: "https://www.amazon.com.mx/dp/B0ABCDEF12"
+    
+    category_pattern: "amazon\\.com\\.mx/(?:s|b|electronics|computers|smartphones)"
+    search_pattern: "amazon\\.com\\.mx/s\\?k="
+
+  # ---------------------------------------------------------------------------
+  # AliExpress
+  # ---------------------------------------------------------------------------
+  - name: aliexpress
+    display_name: AliExpress
+    domain: aliexpress.com
+    domain_pattern: "aliexpress\\.com"
+    enabled: true
+    
+    url_patterns:
+      # Search results: /w/wholesale-keyword.html
+      search:
+        regex: "aliexpress\\.com/w/wholesale-([^.-]+)"
+        example: "https://es.aliexpress.com/w/wholesale-samsung-s25.html"
+      
+      # Product page: /item/xxxxxxxxx
+      product:
+        regex: "aliexpress\\.com/item/(\\d+)"
+        example: "https://es.aliexpress.com/item/1234567890.html"
+      
+      # Category page
+      category:
+        regex: "aliexpress\\.com/[^/]+-([^/]+)"
+        example: "https://es.aliexpress.com/category-1234567890.html"
+    
+    category_pattern: "aliexpress\\.com/(?:category|categories)"
+    search_pattern: "aliexpress\\.com/w/wholesale-"
+
+# =============================================================================
+# Helper functions
+# =============================================================================
+# These patterns can be imported and used in code to identify URLs
+# =============================================================================
+
+# Domain to source mapping
+DOMAIN_TO_SOURCE:
+  "mercadolibre.com.mx": "mercadolibre"
+  "mercadolibre.com": "mercadolibre"
+  "samsung.com": "samsung"
+  "ebay.com": "ebay"
+  "amazon.com.mx": "amazon"
+  "amazon.com": "amazon"
+  "aliexpress.com": "aliexpress"
+
+# Priority order for URL matching (most specific first)
+SOURCE_PRIORITY:
+  - mercadolibre  # Has specific ID patterns (MLM, MLMU)
+  - amazon        # Has ASIN patterns
+  - aliexpress   # Has item ID patterns
+  - ebay         # Has item ID patterns
+  - samsung      # General brand page
+
+# Supported channels for backend export
+SUPPORTED_CHANNELS:
+  - mercadolibre
+  - amazon
+  - ebay
+  - aliexpress
+  - samsung
+
+# Channel to market code mapping
+CHANNEL_TO_MARKET:
+  mercadolibre: "MLM"
+  amazon: "MX"
+  ebay: "US"
+  aliexpress: "CN"
+  samsung: "MX"
+

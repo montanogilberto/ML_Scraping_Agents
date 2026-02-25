@@ -20,4 +20,8 @@ agents/**/.adk/
 # OS/IDE
 .DS_Store
 .vscode/
+
+# Project specific
+MD/
+test_python/
 EOF
